@@ -39,6 +39,61 @@ function calcBollinger(prices, period = 20, mult = 2) {
   return { upper: mid + mult * std, mid, lower: mid - mult * std };
 }
 
+// Simulated MFI: uses tick-to-tick price movement magnitude as a proxy for "volume"
+// since synthetic indices have no real volume data
+function calcMFI(prices, period = 14) {
+  if (prices.length < period + 1) return null;
+  const slice = prices.slice(-period - 1);
+  let positiveFlow = 0;
+  let negativeFlow = 0;
+  for (let i = 1; i < slice.length; i++) {
+    const change = slice[i] - slice[i - 1];
+    const magnitude = Math.abs(change) * slice[i]; // price * movement size as proxy "money flow"
+    if (change > 0) positiveFlow += magnitude;
+    else if (change < 0) negativeFlow += magnitude;
+  }
+  if (negativeFlow === 0) return 100;
+  const moneyRatio = positiveFlow / negativeFlow;
+  return 100 - 100 / (1 + moneyRatio);
+}
+
+// ADX: measures trend strength regardless of direction
+function calcADX(prices, period = 14) {
+  if (prices.length < period * 2 + 1) return null;
+  const slice = prices.slice(-(period * 2 + 1));
+  const plusDM = [];
+  const minusDM = [];
+  const tr = [];
+  for (let i = 1; i < slice.length; i++) {
+    const up = slice[i] - slice[i - 1];
+    const down = slice[i - 1] - slice[i];
+    plusDM.push(up > down && up > 0 ? up : 0);
+    minusDM.push(down > up && down > 0 ? down : 0);
+    tr.push(Math.abs(slice[i] - slice[i - 1]) || 0.0001);
+  }
+  const smooth = (arr, p) => {
+    let sum = arr.slice(0, p).reduce((a, b) => a + b, 0);
+    const out = [sum];
+    for (let i = p; i < arr.length; i++) {
+      sum = sum - sum / p + arr[i];
+      out.push(sum);
+    }
+    return out;
+  };
+  const smoothPlusDM = smooth(plusDM, period);
+  const smoothMinusDM = smooth(minusDM, period);
+  const smoothTR = smooth(tr, period);
+  const dxValues = [];
+  for (let i = 0; i < smoothTR.length; i++) {
+    const plusDI = (smoothPlusDM[i] / smoothTR[i]) * 100;
+    const minusDI = (smoothMinusDM[i] / smoothTR[i]) * 100;
+    const dx = (Math.abs(plusDI - minusDI) / (plusDI + minusDI || 1)) * 100;
+    dxValues.push(dx);
+  }
+  const adx = dxValues.slice(-period).reduce((a, b) => a + b, 0) / Math.min(period, dxValues.length);
+  return adx;
+}
+
 function detectSpike(prices, pct = 0.3) {
   if (prices.length < 3) return false;
   const last = prices[prices.length - 1];
@@ -65,6 +120,8 @@ function computeSignal({ prices, ticksSinceSpike, symbol }) {
   const ema50 = calcEMA(prices, 50);
   const rsi   = calcRSI(prices, 7);
   const bb    = calcBollinger(prices, 20);
+  const mfi   = calcMFI(prices, 14);
+  const adx   = calcADX(prices, 14);
   const price = prices[prices.length - 1];
 
   if (!ema8 || !ema21 || !ema50 || !rsi || !bb) return null;
@@ -88,27 +145,25 @@ function computeSignal({ prices, ticksSinceSpike, symbol }) {
 
   if (isBoom) {
     if (ema8 > ema21 && ema21 > ema50) { score += 30; reasons.push("EMAs alcistas alineadas"); }
-    if (rsi > 35 && rsi < 60)           { score += 20; reasons.push(`RSI ${rsi.toFixed(0)} en zona de compra`); }
-    if (price <= bb.mid && price >= bb.lower) { score += 20; reasons.push("Precio en zona baja de BB"); }
-    if (sweetSpot)                       { score += 20; reasons.push(`${ticksSinceSpike} ticks — zona óptima`); }
-    if (ha3Aligned)                      { score += 10; reasons.push("3 Heiken Ashi verdes"); }
+    if (rsi > 30 && rsi < 65)           { score += 20; reasons.push(`RSI ${rsi.toFixed(0)} en zona de compra`); }
+    if (price <= bb.mid && price >= bb.lower) { score += 15; reasons.push("Precio en zona baja de BB"); }
+    if (mfi !== null && mfi > 50)       { score += 12; reasons.push(`MFI ${mfi.toFixed(0)} — presión compradora`); }
+    if (adx !== null && adx > 25)       { score += 13; reasons.push(`ADX ${adx.toFixed(0)} — tendencia fuerte`); }
+    if (sweetSpot)                       { score += 5; reasons.push(`${ticksSinceSpike} ticks — zona óptima`); }
+    if (ha3Aligned)                      { score += 5; reasons.push("3 Heiken Ashi verdes"); }
   } else {
     if (ema8 < ema21 && ema21 < ema50) { score += 30; reasons.push("EMAs bajistas alineadas"); }
-    if (rsi > 40 && rsi < 65)           { score += 20; reasons.push(`RSI ${rsi.toFixed(0)} en zona de venta`); }
-    if (price >= bb.mid && price <= bb.upper) { score += 20; reasons.push("Precio en zona alta de BB"); }
-    if (sweetSpot)                       { score += 20; reasons.push(`${ticksSinceSpike} ticks — zona óptima`); }
-    if (ha3Aligned)                      { score += 10; reasons.push("3 Heiken Ashi rojas"); }
+    if (rsi > 35 && rsi < 70)           { score += 20; reasons.push(`RSI ${rsi.toFixed(0)} en zona de venta`); }
+    if (price >= bb.mid && price <= bb.upper) { score += 15; reasons.push("Precio en zona alta de BB"); }
+    if (mfi !== null && mfi < 50)       { score += 12; reasons.push(`MFI ${mfi.toFixed(0)} — presión vendedora`); }
+    if (adx !== null && adx > 25)       { score += 13; reasons.push(`ADX ${adx.toFixed(0)} — tendencia fuerte`); }
+    if (sweetSpot)                       { score += 5; reasons.push(`${ticksSinceSpike} ticks — zona óptima`); }
+    if (ha3Aligned)                      { score += 5; reasons.push("3 Heiken Ashi rojas"); }
   }
 
   let signal = "ESPERAR";
-  if (dangerZone) {
-    // In danger zone, only allow signal if score is very high (strong confluence)
-    if (score >= 85) signal = isBoom ? "BUY" : "SELL";
-    else if (score >= 60) signal = "POSIBLE";
-  } else {
-    if (score >= 70) signal = isBoom ? "BUY" : "SELL";
-    else if (score >= 45) signal = "POSIBLE";
-  }
+  if (score >= 60) signal = isBoom ? "BUY" : "SELL";
+  else if (score >= 35) signal = "POSIBLE";
 
   const slDist = Math.abs(price - ema50) * 1.1;
   const sl = isBoom ? price - slDist : price + slDist;
@@ -116,7 +171,7 @@ function computeSignal({ prices, ticksSinceSpike, symbol }) {
 
   return {
     signal, score, reasons, dangerZone, sweetSpot,
-    price, ema8, ema21, ema50, rsi, bb,
+    price, ema8, ema21, ema50, rsi, bb, mfi, adx,
     sl: sl.toFixed(2), tp: tp.toFixed(2),
     ticksSinceSpike,
   };
@@ -297,8 +352,10 @@ export default function App() {
 
   const ema8ok  = signalData ? (isBoom ? signalData.ema8 > signalData.ema21 : signalData.ema8 < signalData.ema21) : null;
   const ema21ok = signalData ? (isBoom ? signalData.ema21 > signalData.ema50 : signalData.ema21 < signalData.ema50) : null;
-  const rsiOk   = signalData ? (isBoom ? signalData.rsi > 35 && signalData.rsi < 60 : signalData.rsi > 40 && signalData.rsi < 65) : null;
+  const rsiOk   = signalData ? (isBoom ? signalData.rsi > 30 && signalData.rsi < 65 : signalData.rsi > 35 && signalData.rsi < 70) : null;
   const bbOk    = signalData && signalData.bb ? (isBoom ? currentPrice <= signalData.bb.mid : currentPrice >= signalData.bb.mid) : null;
+  const mfiOk   = signalData && signalData.mfi !== null && signalData.mfi !== undefined ? (isBoom ? signalData.mfi > 50 : signalData.mfi < 50) : null;
+  const adxOk   = signalData && signalData.adx !== null && signalData.adx !== undefined ? signalData.adx > 25 : null;
 
   return (
     <div style={{ minHeight: "100vh", background: "#07090f", color: "#c9d1d9", fontFamily: "'Inter', sans-serif", fontSize: 14 }}>
@@ -397,11 +454,13 @@ export default function App() {
         )}
 
         {signalData && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginBottom: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, marginBottom: 14 }}>
             <Chip label="EMA 8/21" value={signalData.ema8?.toFixed(2)} ok={ema8ok} />
             <Chip label="EMA 21/50" value={signalData.ema21?.toFixed(2)} ok={ema21ok} />
             <Chip label="RSI 7" value={signalData.rsi?.toFixed(1)} ok={rsiOk} />
             <Chip label="BB MID" value={signalData.bb?.mid?.toFixed(2)} ok={bbOk} />
+            <Chip label="MFI 14" value={signalData.mfi?.toFixed(1) ?? "—"} ok={mfiOk} />
+            <Chip label="ADX 14" value={signalData.adx?.toFixed(1) ?? "—"} ok={adxOk} />
           </div>
         )}
 
@@ -452,7 +511,7 @@ export default function App() {
             )}
             {signalData.dangerZone && (
               <div style={{ background: "#ff386022", borderTop: "1px solid #ff386033", padding: "8px 18px", fontSize: 11, color: "#ff3860", fontFamily: "monospace" }}>
-                ⚠ ZONA DE PELIGRO — Muchos ticks sin spike. Solo señales con score 85+ se muestran aquí.
+                ⚠ Muchos ticks sin spike — mayor probabilidad de spike inminente. Opera con precaución.
               </div>
             )}
           </div>
