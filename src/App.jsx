@@ -1,14 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
+// ── CONSTANTS ──────────────────────────────────────────────────────────────
 const SYMBOLS = {
-  "Boom 300":  { id: "BOOM300N",  dir: "boom",  spikePct: 0.8, maxTicks: 300 },
-  "Boom 500":  { id: "BOOM500N",  dir: "boom",  spikePct: 0.8, maxTicks: 500 },
-  "Crash 300": { id: "CRASH300N", dir: "crash", spikePct: 0.8, maxTicks: 300 },
-  "Crash 500": { id: "CRASH500N", dir: "crash", spikePct: 0.8, maxTicks: 500 },
+  "Boom 300":  { id: "BOOM300N",  dir: "boom",  spikePct: 0.3, maxTicks: 300 },
+  "Boom 500":  { id: "BOOM500N",  dir: "boom",  spikePct: 0.25, maxTicks: 500 },
+  "Crash 300": { id: "CRASH300N", dir: "crash", spikePct: 0.3, maxTicks: 300 },
+  "Crash 500": { id: "CRASH500N", dir: "crash", spikePct: 0.25, maxTicks: 500 },
 };
 
 const DERIV_WS = "wss://ws.binaryws.com/websockets/v3?app_id=1089";
 
+// ── MATH HELPERS ──────────────────────────────────────────────────────────
 function calcEMA(prices, period) {
   if (prices.length < period) return null;
   const k = 2 / (period + 1);
@@ -37,14 +39,21 @@ function calcBollinger(prices, period = 20, mult = 2) {
   return { upper: mid + mult * std, mid, lower: mid - mult * std };
 }
 
-function detectSpike(prices, pct = 0.8) {
-  if (prices.length < 2) return false;
+function detectSpike(prices, pct = 0.3) {
+  if (prices.length < 3) return false;
   const last = prices[prices.length - 1];
   const prev = prices[prices.length - 2];
-  const change = Math.abs((last - prev) / prev) * 100;
-  return change > pct;
+  const prev2 = prices[prices.length - 3];
+  // Check single-tick jump
+  const change1 = Math.abs((last - prev) / prev) * 100;
+  if (change1 > pct) return true;
+  // Check 2-tick cumulative move (catches spikes that happen over 2-3 ticks)
+  const change2 = Math.abs((last - prev2) / prev2) * 100;
+  if (change2 > pct * 1.4) return true;
+  return false;
 }
 
+// ── SIGNAL ENGINE ────────────────────────────────────────────────────────
 function computeSignal({ prices, ticksSinceSpike, symbol }) {
   if (prices.length < 52) return null;
   const sym = SYMBOLS[symbol];
@@ -92,8 +101,14 @@ function computeSignal({ prices, ticksSinceSpike, symbol }) {
   }
 
   let signal = "ESPERAR";
-  if (score >= 70 && !dangerZone) signal = isBoom ? "BUY" : "SELL";
-  else if (score >= 45 && !dangerZone) signal = "POSIBLE";
+  if (dangerZone) {
+    // In danger zone, only allow signal if score is very high (strong confluence)
+    if (score >= 85) signal = isBoom ? "BUY" : "SELL";
+    else if (score >= 60) signal = "POSIBLE";
+  } else {
+    if (score >= 70) signal = isBoom ? "BUY" : "SELL";
+    else if (score >= 45) signal = "POSIBLE";
+  }
 
   const slDist = Math.abs(price - ema50) * 1.1;
   const sl = isBoom ? price - slDist : price + slDist;
@@ -107,6 +122,7 @@ function computeSignal({ prices, ticksSinceSpike, symbol }) {
   };
 }
 
+// ── SOUND ────────────────────────────────────────────────────────────────
 function playBeep(type = "alert") {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -128,6 +144,7 @@ function playBeep(type = "alert") {
   } catch (_) {}
 }
 
+// ── MINI SPARKLINE ────────────────────────────────────────────────────────
 function Sparkline({ prices, color = "#00ff9d", height = 48, width = 180 }) {
   if (!prices || prices.length < 2) return <div style={{ width, height, background: "#0d1117", borderRadius: 3 }} />;
   const min = Math.min(...prices);
@@ -146,6 +163,7 @@ function Sparkline({ prices, color = "#00ff9d", height = 48, width = 180 }) {
   );
 }
 
+// ── TICK PROGRESS BAR ─────────────────────────────────────────────────────
 function TickBar({ ticks, max }) {
   const pct = Math.min((ticks / max) * 100, 100);
   const danger = pct >= 85;
@@ -171,6 +189,7 @@ function TickBar({ ticks, max }) {
   );
 }
 
+// ── INDICATOR CHIP ────────────────────────────────────────────────────────
 function Chip({ label, value, ok }) {
   return (
     <div style={{
@@ -184,6 +203,7 @@ function Chip({ label, value, ok }) {
   );
 }
 
+// ── MAIN APP ──────────────────────────────────────────────────────────────
 export default function App() {
   const [activeSymbol, setActiveSymbol] = useState("Boom 300");
   const [status, setStatus]     = useState("idle");
@@ -432,7 +452,7 @@ export default function App() {
             )}
             {signalData.dangerZone && (
               <div style={{ background: "#ff386022", borderTop: "1px solid #ff386033", padding: "8px 18px", fontSize: 11, color: "#ff3860", fontFamily: "monospace" }}>
-                ⚠ ZONA DE PELIGRO — Spike inminente. No abrir posiciones {isBoom ? "short" : "long"}.
+                ⚠ ZONA DE PELIGRO — Muchos ticks sin spike. Solo señales con score 85+ se muestran aquí.
               </div>
             )}
           </div>
