@@ -94,6 +94,186 @@ function calcADX(prices, period = 14) {
   return adx;
 }
 
+// Market structure: detect Higher-Highs/Higher-Lows (uptrend) or Lower-Highs/Lower-Lows (downtrend)
+// using simple pivot detection over a recent window
+function calcMarketStructure(prices, window = 40) {
+  if (prices.length < window) return null;
+  const slice = prices.slice(-window);
+  const pivots = [];
+  for (let i = 2; i < slice.length - 2; i++) {
+    const isHigh = slice[i] > slice[i-1] && slice[i] > slice[i-2] && slice[i] > slice[i+1] && slice[i] > slice[i+2];
+    const isLow = slice[i] < slice[i-1] && slice[i] < slice[i-2] && slice[i] < slice[i+1] && slice[i] < slice[i+2];
+    if (isHigh) pivots.push({ type: "high", value: slice[i], idx: i });
+    if (isLow) pivots.push({ type: "low", value: slice[i], idx: i });
+  }
+  const highs = pivots.filter(p => p.type === "high");
+  const lows = pivots.filter(p => p.type === "low");
+  if (highs.length < 2 || lows.length < 2) return "undefined";
+  const higherHighs = highs[highs.length - 1].value > highs[highs.length - 2].value;
+  const higherLows = lows[lows.length - 1].value > lows[lows.length - 2].value;
+  const lowerHighs = highs[highs.length - 1].value < highs[highs.length - 2].value;
+  const lowerLows = lows[lows.length - 1].value < lows[lows.length - 2].value;
+  if (higherHighs && higherLows) return "uptrend";
+  if (lowerHighs && lowerLows) return "downtrend";
+  return "ranging";
+}
+
+// Candle pattern: engulfing detection on last 2 "candles" built from consecutive tick pairs
+function calcCandlePattern(prices) {
+  if (prices.length < 6) return null;
+  const c2Open = prices[prices.length - 4];
+  const c2Close = prices[prices.length - 3];
+  const c1Open = prices[prices.length - 2];
+  const c1Close = prices[prices.length - 1];
+  const prevBullish = c2Close > c2Open;
+  const prevBearish = c2Close < c2Open;
+  const currBullish = c1Close > c1Open;
+  const currBearish = c1Close < c1Open;
+  const currBody = Math.abs(c1Close - c1Open);
+  const prevBody = Math.abs(c2Close - c2Open);
+  // Bullish engulfing: prev bearish, curr bullish and bigger body
+  if (prevBearish && currBullish && currBody > prevBody) return "bullish_engulfing";
+  // Bearish engulfing: prev bullish, curr bearish and bigger body
+  if (prevBullish && currBearish && currBody > prevBody) return "bearish_engulfing";
+  return "none";
+}
+
+// Fibonacci retracement: find recent swing high/low, return key levels and where price sits
+function calcFibonacci(prices, window = 60) {
+  if (prices.length < window) return null;
+  const slice = prices.slice(-window);
+  const swingHigh = Math.max(...slice);
+  const swingLow = Math.min(...slice);
+  const range = swingHigh - swingLow;
+  if (range === 0) return null;
+  const price = prices[prices.length - 1];
+  const levels = {
+    l236: swingHigh - range * 0.236,
+    l382: swingHigh - range * 0.382,
+    l50:  swingHigh - range * 0.5,
+    l618: swingHigh - range * 0.618,
+    l786: swingHigh - range * 0.786,
+  };
+  // Extension projections (beyond the move, for TP reference)
+  const ext1272 = swingLow - range * 0.272;
+  const ext1618 = swingLow - range * 0.618;
+  // is price currently inside the "golden zone" 38.2%-61.8%?
+  const inGoldenZone = price <= levels.l382 && price >= levels.l618;
+  return { swingHigh, swingLow, levels, inGoldenZone, ext1272, ext1618 };
+}
+
+// RSI/Price divergence: compares last two swing points
+function calcDivergence(prices, period = 7, window = 30) {
+  if (prices.length < window + period) return null;
+  const slice = prices.slice(-window);
+  let maxIdx = 0, minIdx = 0;
+  for (let i = 1; i < slice.length; i++) {
+    if (slice[i] > slice[maxIdx]) maxIdx = i;
+    if (slice[i] < slice[minIdx]) minIdx = i;
+  }
+  // simplistic: compare RSI at first half vs second half peak/trough
+  const firstHalf = prices.slice(-window, -Math.floor(window / 2));
+  const secondHalf = prices.slice(-Math.floor(window / 2));
+  const rsiFirst = calcRSI(firstHalf, period);
+  const rsiSecond = calcRSI(secondHalf, period);
+  if (rsiFirst === null || rsiSecond === null) return null;
+  const priceFirst = Math.max(...firstHalf);
+  const priceSecond = Math.max(...secondHalf);
+  const priceLowFirst = Math.min(...firstHalf);
+  const priceLowSecond = Math.min(...secondHalf);
+  // Bearish divergence: price higher high, RSI lower high
+  const bearishDiv = priceSecond > priceFirst && rsiSecond < rsiFirst;
+  // Bullish divergence: price lower low, RSI higher low
+  const bullishDiv = priceLowSecond < priceLowFirst && rsiSecond > rsiFirst;
+  if (bearishDiv) return "bearish";
+  if (bullishDiv) return "bullish";
+  return "none";
+}
+
+// Multi-timeframe simulated: compares short-term EMA trend (8/21) vs longer "macro" trend (50/100)
+function calcMultiTimeframe(prices) {
+  if (prices.length < 100) return null;
+  const emaShort8 = calcEMA(prices, 8);
+  const emaShort21 = calcEMA(prices, 21);
+  const emaLong50 = calcEMA(prices, 50);
+  const emaLong100 = calcEMA(prices, 100);
+  if (!emaShort8 || !emaShort21 || !emaLong50 || !emaLong100) return null;
+  const shortUp = emaShort8 > emaShort21;
+  const longUp = emaLong50 > emaLong100;
+  if (shortUp && longUp) return "aligned_up";
+  if (!shortUp && !longUp) return "aligned_down";
+  return "conflict";
+}
+
+// Bollinger width trend: are bands expanding (volatility increasing) or contracting
+function calcBBWidthTrend(prices, period = 20) {
+  if (prices.length < period + 10) return null;
+  const bbNow = calcBollinger(prices, period);
+  const bbPrev = calcBollinger(prices.slice(0, -10), period);
+  if (!bbNow || !bbPrev) return null;
+  const widthNow = bbNow.upper - bbNow.lower;
+  const widthPrev = bbPrev.upper - bbPrev.lower;
+  return widthNow > widthPrev ? "expanding" : "contracting";
+}
+
+// Builds a list of "watch levels" — specific price points worth monitoring,
+// rather than reacting to every single tick. Combines Fibonacci, structure
+// pivots, and the last spike price.
+function calcWatchLevels(prices, lastSpike, isBoom) {
+  if (prices.length < 60) return [];
+  const fib = calcFibonacci(prices, 60);
+  const levels = [];
+
+  if (fib) {
+    levels.push({
+      price: fib.levels.l382,
+      label: "Fibonacci 38.2%",
+      type: "fib",
+    });
+    levels.push({
+      price: fib.levels.l50,
+      label: "Fibonacci 50%",
+      type: "fib",
+    });
+    levels.push({
+      price: fib.levels.l618,
+      label: "Fibonacci 61.8%",
+      type: "fib",
+    });
+  }
+
+  // Structure pivot: most recent significant high/low in the last 40 ticks
+  const slice = prices.slice(-40);
+  for (let i = 2; i < slice.length - 2; i++) {
+    const isHigh = slice[i] > slice[i-1] && slice[i] > slice[i-2] && slice[i] > slice[i+1] && slice[i] > slice[i+2];
+    const isLow = slice[i] < slice[i-1] && slice[i] < slice[i-2] && slice[i] < slice[i+1] && slice[i] < slice[i+2];
+    if (isHigh && i === slice.length - 3) {
+      levels.push({ price: slice[i], label: "Resistencia (pivote reciente)", type: "structure" });
+    }
+    if (isLow && i === slice.length - 3) {
+      levels.push({ price: slice[i], label: "Soporte (pivote reciente)", type: "structure" });
+    }
+  }
+
+  // Last spike price as a psychological reference level
+  if (lastSpike) {
+    levels.push({ price: lastSpike.price, label: "Nivel del último spike", type: "spike" });
+  }
+
+  return levels;
+}
+
+// Checks if current price is touching any watch level within tolerance
+function checkLevelTouch(price, levels, tolerancePct = 0.05) {
+  for (const lvl of levels) {
+    const distance = Math.abs((price - lvl.price) / lvl.price) * 100;
+    if (distance <= tolerancePct) {
+      return lvl;
+    }
+  }
+  return null;
+}
+
 function detectSpike(prices, pct = 0.3) {
   if (prices.length < 3) return false;
   const last = prices[prices.length - 1];
@@ -110,7 +290,7 @@ function detectSpike(prices, pct = 0.3) {
 
 // ── SIGNAL ENGINE ────────────────────────────────────────────────────────
 function computeSignal({ prices, ticksSinceSpike, symbol }) {
-  if (prices.length < 52) return null;
+  if (prices.length < 100) return null;
   const sym = SYMBOLS[symbol];
   const isBoom = sym.dir === "boom";
   const maxT = sym.maxTicks;
@@ -122,6 +302,12 @@ function computeSignal({ prices, ticksSinceSpike, symbol }) {
   const bb    = calcBollinger(prices, 20);
   const mfi   = calcMFI(prices, 14);
   const adx   = calcADX(prices, 14);
+  const structure = calcMarketStructure(prices, 40);
+  const candlePattern = calcCandlePattern(prices);
+  const fib = calcFibonacci(prices, 60);
+  const divergence = calcDivergence(prices, 7, 30);
+  const mtf = calcMultiTimeframe(prices);
+  const bbWidthTrend = calcBBWidthTrend(prices, 20);
   const price = prices[prices.length - 1];
 
   if (!ema8 || !ema21 || !ema50 || !rsi || !bb) return null;
@@ -140,30 +326,117 @@ function computeSignal({ prices, ticksSinceSpike, symbol }) {
   const dangerZone = ticksSinceSpike >= maxT * 0.85;
   const sweetSpot  = ticksSinceSpike >= maxT * 0.5 && ticksSinceSpike < maxT * 0.85;
 
-  let score = 0;
-  const reasons = [];
+  // ── 13-CATEGORY VOTING SYSTEM ──
+  // Each category casts at most 1 vote, regardless of how many sub-checks it has.
+  // This avoids redundant indicators inflating the score artificially.
+  const categories = [];
 
-  if (isBoom) {
-    if (ema8 > ema21 && ema21 > ema50) { score += 30; reasons.push("EMAs alcistas alineadas"); }
-    if (rsi > 30 && rsi < 65)           { score += 20; reasons.push(`RSI ${rsi.toFixed(0)} en zona de compra`); }
-    if (price <= bb.mid && price >= bb.lower) { score += 15; reasons.push("Precio en zona baja de BB"); }
-    if (mfi !== null && mfi > 50)       { score += 12; reasons.push(`MFI ${mfi.toFixed(0)} — presión compradora`); }
-    if (adx !== null && adx > 25)       { score += 13; reasons.push(`ADX ${adx.toFixed(0)} — tendencia fuerte`); }
-    if (sweetSpot)                       { score += 5; reasons.push(`${ticksSinceSpike} ticks — zona óptima`); }
-    if (ha3Aligned)                      { score += 5; reasons.push("3 Heiken Ashi verdes"); }
-  } else {
-    if (ema8 < ema21 && ema21 < ema50) { score += 30; reasons.push("EMAs bajistas alineadas"); }
-    if (rsi > 35 && rsi < 70)           { score += 20; reasons.push(`RSI ${rsi.toFixed(0)} en zona de venta`); }
-    if (price >= bb.mid && price <= bb.upper) { score += 15; reasons.push("Precio en zona alta de BB"); }
-    if (mfi !== null && mfi < 50)       { score += 12; reasons.push(`MFI ${mfi.toFixed(0)} — presión vendedora`); }
-    if (adx !== null && adx > 25)       { score += 13; reasons.push(`ADX ${adx.toFixed(0)} — tendencia fuerte`); }
-    if (sweetSpot)                       { score += 5; reasons.push(`${ticksSinceSpike} ticks — zona óptima`); }
-    if (ha3Aligned)                      { score += 5; reasons.push("3 Heiken Ashi rojas"); }
-  }
+  // 1. Tendencia (EMAs)
+  categories.push({
+    name: "Tendencia (EMAs)",
+    vote: isBoom ? (ema8 > ema21 && ema21 > ema50) : (ema8 < ema21 && ema21 < ema50),
+    detail: "EMAs alineadas",
+  });
+
+  // 2. Momentum (RSI + MFI combined into one vote)
+  const rsiFav = isBoom ? (rsi > 30 && rsi < 65) : (rsi > 35 && rsi < 70);
+  const mfiFav = mfi !== null ? (isBoom ? mfi > 50 : mfi < 50) : false;
+  categories.push({
+    name: "Momentum (RSI+MFI)",
+    vote: rsiFav && mfiFav,
+    detail: `RSI ${rsi.toFixed(0)} / MFI ${mfi !== null ? mfi.toFixed(0) : "—"}`,
+  });
+
+  // 3. Fuerza de tendencia (ADX)
+  categories.push({
+    name: "Fuerza (ADX)",
+    vote: adx !== null && adx > 25,
+    detail: `ADX ${adx !== null ? adx.toFixed(0) : "—"}`,
+  });
+
+  // 4. Posición en Bollinger
+  categories.push({
+    name: "Posición BB",
+    vote: isBoom ? (price <= bb.mid && price >= bb.lower) : (price >= bb.mid && price <= bb.upper),
+    detail: "Precio en zona favorable de BB",
+  });
+
+  // 5. Estructura de mercado
+  categories.push({
+    name: "Estructura",
+    vote: structure === (isBoom ? "uptrend" : "downtrend"),
+    detail: `Estructura: ${structure || "—"}`,
+  });
+
+  // 6. Patrón de vela
+  categories.push({
+    name: "Patrón vela",
+    vote: candlePattern === (isBoom ? "bullish_engulfing" : "bearish_engulfing"),
+    detail: `Patrón: ${candlePattern || "—"}`,
+  });
+
+  // 7. Fibonacci retroceso (golden zone)
+  categories.push({
+    name: "Fibonacci retroceso",
+    vote: fib ? fib.inGoldenZone : false,
+    detail: "Precio en zona dorada (38.2%-61.8%)",
+  });
+
+  // 8. Heiken Ashi
+  categories.push({
+    name: "Heiken Ashi",
+    vote: ha3Aligned,
+    detail: "3 velas HA alineadas",
+  });
+
+  // 9. Distancia al spike (zona óptima)
+  categories.push({
+    name: "Zona de ticks",
+    vote: sweetSpot,
+    detail: `${ticksSinceSpike} ticks desde spike`,
+  });
+
+  // 10. Ancho de Bollinger (expansión favorece movimiento)
+  categories.push({
+    name: "Ancho BB",
+    vote: bbWidthTrend === "expanding",
+    detail: `Bandas ${bbWidthTrend || "—"}`,
+  });
+
+  // 11. Divergencia RSI/Precio
+  categories.push({
+    name: "Divergencia",
+    vote: divergence === (isBoom ? "bullish" : "bearish"),
+    detail: `Divergencia: ${divergence || "—"}`,
+  });
+
+  // 12. Multi-timeframe simulado
+  categories.push({
+    name: "Multi-timeframe",
+    vote: mtf === (isBoom ? "aligned_up" : "aligned_down"),
+    detail: `MTF: ${mtf || "—"}`,
+  });
+
+  // 13. Fibonacci extensión (informativo para TP, también vota si hay espacio para extender)
+  const fibExtRoom = fib ? (isBoom ? price < fib.swingHigh : price > fib.swingLow) : false;
+  categories.push({
+    name: "Fibonacci extensión",
+    vote: fibExtRoom,
+    detail: "Espacio para extensión de Fibonacci",
+  });
+
+  const votesInFavor = categories.filter(c => c.vote).length;
+  const totalCategories = categories.length;
+  const reasons = categories.filter(c => c.vote).map(c => c.detail);
+  const score = Math.round((votesInFavor / totalCategories) * 100);
+
+  // Threshold: 8 of 13 categories required for confirmed signal (≈62%, "balanced" tier)
+  const CONFIRM_THRESHOLD = 8;
+  const POSSIBLE_THRESHOLD = 6;
 
   let signal = "ESPERAR";
-  if (score >= 60) signal = isBoom ? "BUY" : "SELL";
-  else if (score >= 35) signal = "POSIBLE";
+  if (votesInFavor >= CONFIRM_THRESHOLD) signal = isBoom ? "BUY" : "SELL";
+  else if (votesInFavor >= POSSIBLE_THRESHOLD) signal = "POSIBLE";
 
   const slDist = Math.abs(price - ema50) * 1.1;
   const sl = isBoom ? price - slDist : price + slDist;
@@ -172,6 +445,8 @@ function computeSignal({ prices, ticksSinceSpike, symbol }) {
   return {
     signal, score, reasons, dangerZone, sweetSpot,
     price, ema8, ema21, ema50, rsi, bb, mfi, adx,
+    structure, candlePattern, fib, divergence, mtf, bbWidthTrend,
+    votesInFavor, totalCategories, categories,
     sl: sl.toFixed(2), tp: tp.toFixed(2),
     ticksSinceSpike,
   };
@@ -269,11 +544,16 @@ export default function App() {
   const [signalData, setSignalData] = useState(null);
   const [alerts, setAlerts]     = useState([]);
   const [soundOn, setSoundOn]   = useState(true);
+  const [watchLevels, setWatchLevels] = useState([]);
+  const [touchedLevel, setTouchedLevel] = useState(null);
 
   const wsRef        = useRef(null);
   const pricesRef    = useRef([]);
   const tssRef       = useRef(0);
   const prevSignalRef = useRef(null);
+  const lastSpikeRef  = useRef(null);
+  const levelsRef     = useRef([]);
+  const touchedLevelRef = useRef(null);
 
   const sym = SYMBOLS[activeSymbol];
 
@@ -282,7 +562,9 @@ export default function App() {
     setStatus("connecting");
     setPrices([]); setTickCount(0); setTicksSinceSpike(0);
     setSignalData(null); setAlerts([]); setLastSpike(null);
+    setWatchLevels([]); setTouchedLevel(null);
     pricesRef.current = []; tssRef.current = 0;
+    lastSpikeRef.current = null; levelsRef.current = []; touchedLevelRef.current = null;
 
     const ws = new WebSocket(DERIV_WS);
     wsRef.current = ws;
@@ -303,7 +585,11 @@ export default function App() {
         const isSpike = detectSpike(pricesRef.current, sym.spikePct);
         if (isSpike) {
           tssRef.current = 0;
-          setLastSpike({ price, time: new Date().toLocaleTimeString("es-CO") });
+          const spikeData = { price, time: new Date().toLocaleTimeString("es-CO") };
+          lastSpikeRef.current = spikeData;
+          setLastSpike(spikeData);
+          touchedLevelRef.current = null;
+          setTouchedLevel(null);
           if (soundOn) playBeep("alert");
           setAlerts(a => [{
             type: "spike",
@@ -317,14 +603,36 @@ export default function App() {
         setTickCount(tc => tc + 1);
         setTicksSinceSpike(tss);
 
+        // Recalculate watch levels every 20 ticks (levels shouldn't jump every tick)
+        if (pricesRef.current.length % 20 === 0 || levelsRef.current.length === 0) {
+          const lvls = calcWatchLevels(pricesRef.current, lastSpikeRef.current, sym.dir === "boom");
+          levelsRef.current = lvls;
+          setWatchLevels(lvls);
+        }
+
         if (pricesRef.current.length % 5 === 0) {
           const sig = computeSignal({ prices: pricesRef.current, ticksSinceSpike: tss, symbol: activeSymbol });
           setSignalData(sig);
 
+          // Check if price is touching a watch level right now
+          const touched = checkLevelTouch(price, levelsRef.current, 0.05);
+          if (touched && touchedLevelRef.current?.price !== touched.price) {
+            touchedLevelRef.current = touched;
+            setTouchedLevel(touched);
+            if (soundOn) playBeep("alert");
+            const strongConfirm = sig && sig.votesInFavor >= 8;
+            const alertMsg = strongConfirm
+              ? `🎯 PRECIO TOCÓ ${touched.label} (${touched.price.toFixed(2)}) — ${sig.votesInFavor}/13 categorías a favor. Considera ${sig.signal === "BUY" ? "COMPRAR" : "VENDER"} aquí.`
+              : `📍 Precio tocó ${touched.label} (${touched.price.toFixed(2)}) — solo ${sig ? sig.votesInFavor : 0}/13 categorías a favor, confirmación débil.`;
+            setAlerts(a => [{ type: strongConfirm ? "signal" : "level", msg: alertMsg, time: new Date().toLocaleTimeString("es-CO") }, ...a.slice(0, 9)]);
+          } else if (!touched) {
+            touchedLevelRef.current = null;
+          }
+
           if (sig && sig.signal !== prevSignalRef.current) {
             if (sig.signal === "BUY" || sig.signal === "SELL") {
               if (soundOn) playBeep("entry");
-              const alertMsg = `🎯 SEÑAL ${sig.signal} — Score ${sig.score}/100 — Entrada: ${sig.price.toFixed(2)} SL: ${sig.sl} TP: ${sig.tp}`;
+              const alertMsg = `🎯 SEÑAL ${sig.signal} — ${sig.votesInFavor}/13 categorías — Entrada: ${sig.price.toFixed(2)} SL: ${sig.sl} TP: ${sig.tp}`;
               setAlerts(a => [{ type: "signal", msg: alertMsg, time: new Date().toLocaleTimeString("es-CO") }, ...a.slice(0, 9)]);
             }
             prevSignalRef.current = sig.signal;
@@ -453,6 +761,35 @@ export default function App() {
           </div>
         )}
 
+        {watchLevels.length > 0 && (
+          <div style={{ background: "#0a0d1a", border: "1px solid #1a1a2e", borderRadius: 6, padding: "12px 18px", marginBottom: 14 }}>
+            <div style={{ fontSize: 9, color: "#555", fontFamily: "monospace", letterSpacing: 2, marginBottom: 10 }}>
+              📍 NIVELES DE VIGILANCIA — esperando que el precio llegue aquí
+            </div>
+            {watchLevels.map((lvl, i) => {
+              const dist = currentPrice ? ((currentPrice - lvl.price) / lvl.price * 100) : 0;
+              const isTouched = touchedLevel && Math.abs(touchedLevel.price - lvl.price) < 0.001;
+              const typeColor = lvl.type === "fib" ? "#f5c518" : lvl.type === "spike" ? "#ff3860" : "#00b3ff";
+              return (
+                <div key={i} style={{
+                  display: "flex", justifyContent: "space-between", alignItems: "center",
+                  padding: "6px 10px", marginBottom: 4, borderRadius: 3,
+                  background: isTouched ? `${typeColor}22` : "#ffffff05",
+                  border: `1px solid ${isTouched ? typeColor : "#1e1e2e"}`,
+                }}>
+                  <div>
+                    <span style={{ color: typeColor, fontFamily: "monospace", fontSize: 11, fontWeight: 700 }}>{lvl.label}</span>
+                    <span style={{ color: "#555", fontFamily: "monospace", fontSize: 10, marginLeft: 8 }}>{lvl.price.toFixed(2)}</span>
+                  </div>
+                  <span style={{ fontFamily: "monospace", fontSize: 10, color: Math.abs(dist) < 0.05 ? "#00ff9d" : "#444" }}>
+                    {isTouched ? "✓ TOCADO" : `${dist > 0 ? "+" : ""}${dist.toFixed(2)}%`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {signalData && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, marginBottom: 14 }}>
             <Chip label="EMA 8/21" value={signalData.ema8?.toFixed(2)} ok={ema8ok} />
@@ -480,14 +817,28 @@ export default function App() {
               </div>
               <div style={{ marginTop: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                  <span style={{ fontFamily: "monospace", fontSize: 10, color: "#555", letterSpacing: 1 }}>SCORE</span>
-                  <span style={{ fontFamily: "monospace", fontWeight: 700, color: signalColor(signalData.signal), fontSize: 12 }}>{signalData.score}/100</span>
+                  <span style={{ fontFamily: "monospace", fontSize: 10, color: "#555", letterSpacing: 1 }}>CATEGORÍAS A FAVOR</span>
+                  <span style={{ fontFamily: "monospace", fontWeight: 700, color: signalColor(signalData.signal), fontSize: 12 }}>{signalData.votesInFavor}/{signalData.totalCategories} ({signalData.score}%)</span>
                 </div>
                 <div style={{ background: "#1e1e2e", borderRadius: 2, height: 5 }}>
                   <div style={{ width: `${signalData.score}%`, height: "100%", borderRadius: 2, background: signalColor(signalData.signal), transition: "width 0.5s ease" }} />
                 </div>
               </div>
             </div>
+            {signalData.categories && (
+              <div style={{ padding: "0 18px 8px", display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 4 }}>
+                {signalData.categories.map((c, i) => (
+                  <div key={i} style={{
+                    fontSize: 9, fontFamily: "monospace", padding: "3px 6px", borderRadius: 3,
+                    background: c.vote ? "#00ff9d11" : "#ffffff05",
+                    color: c.vote ? "#00ff9d" : "#444",
+                    border: `1px solid ${c.vote ? "#00ff9d22" : "#1e1e2e"}`,
+                  }}>
+                    {c.vote ? "✓" : "○"} {c.name}
+                  </div>
+                ))}
+              </div>
+            )}
             <div style={{ padding: "12px 18px", display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
               <div style={{ textAlign: "center" }}>
                 <div style={{ fontSize: 9, color: "#555", fontFamily: "monospace", letterSpacing: 1 }}>ENTRADA</div>
